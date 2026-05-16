@@ -1,0 +1,14 @@
+/* resources.rc — embedded assets for Quick PDF Tool
+ *
+ * All files are baked into the EXE at compile time.
+ * No external files are required at run-time.
+ *
+ * ID   1 = App icon (.ico) — title bar, taskbar, and EXE file in Explorer
+ * ID 101 = ENERFLEX logo PNG (shown on the Merge screen)
+ */
+
+#define IDI_APPICON   1
+#define IDR_LOGO_PNG  101
+
+IDI_APPICON   ICON    "efxicon.ico"
+IDR_LOGO_PNG  RCDATA  "ENERFLEX.png"
