@@ -185,9 +185,12 @@ try_parse_standard_xref(PDF *pdf, long long xpos)
             if (pos < pdf->size && (pdf->data[pos] == ' ' || pdf->data[pos] == '\r')) pos++;
             if (pos < pdf->size && pdf->data[pos] == '\n') pos++;
 
-            pdf->xref[first + i].offset = off;
-            pdf->xref[first + i].gen    = gen;
-            pdf->xref[first + i].free   = is_free;
+            /* First-wins: caller traverses newest→oldest so skip if already populated */
+            if (pdf->xref[first + i].offset == 0 && !pdf->xref[first + i].free) {
+                pdf->xref[first + i].offset = off;
+                pdf->xref[first + i].gen    = gen;
+                pdf->xref[first + i].free   = is_free;
+            }
         }
     }
     return 1;
@@ -221,8 +224,8 @@ build_xref_by_scan(PDF *pdf)
         /* Valid "N G obj" found */
         if (obj_num <= 0 || obj_num > 1000000) continue;
         if (!xref_ensure(pdf, obj_num + 1)) continue;
-        /* Keep first occurrence (linearized PDFs list objects near the top) */
-        if (pdf->xref[obj_num].offset == 0) {
+        /* Only record if slot is empty and not already marked free */
+        if (pdf->xref[obj_num].offset == 0 && !pdf->xref[obj_num].free) {
             pdf->xref[obj_num].offset = i;
             pdf->xref[obj_num].gen    = gen;
             pdf->xref[obj_num].free   = 0;
@@ -300,6 +303,218 @@ find_catalog_num(PDF *pdf)
     }
 }
 
+/* ============================================================
+ * XREF STREAM PARSER  (PDF 1.5+ — required for digitally signed PDFs)
+ *
+ * Signed PDFs (and most modern PDFs) use compressed cross-reference streams
+ * instead of, or in addition to, plain "xref" tables.  Each update appended
+ * during signing adds a new xref stream whose /Prev key points backward to
+ * the previous one.  We must walk this chain newest→oldest so that the most
+ * recent version of every object (the signed/updated one) wins.
+ *
+ * dict_get_int() and flate_decompress() are defined later in this file;
+ * forward-declare them so the xref-stream parser can call them.
+ * ============================================================ */
+
+static int           dict_get_int    (const unsigned char *, int, const char *); /* fwd */
+static unsigned char *flate_decompress(const unsigned char *, int, int *);        /* fwd */
+
+/* Read a big-endian integer of `w` bytes from data[*pos]. Advances *pos by w. */
+static long long
+xref_read_field(const unsigned char *data, int w, long long *pos)
+{
+    long long val = 0;
+    for (int b = 0; b < w; b++) val = (val << 8) | data[(*pos)++];
+    return val;
+}
+
+/* Extract /Prev integer from a dict slice. Returns -1 if not found. */
+static long long
+dict_get_prev(const unsigned char *data, int len)
+{
+    const unsigned char *p = my_memmem(data, (size_t)len, "/Prev", 5);
+    if (!p) return -1;
+    long long pos = (p - data) + 5;
+    skip_ws(data, len, &pos);
+    if (pos >= len || !isdigit(data[pos])) return -1;
+    return read_int(data, len, &pos);
+}
+
+/*
+ * Parse one XRef Stream object at file offset `xpos` (PDF 1.5+).
+ * Fills pdf->xref with first-wins semantics (caller must walk newest→oldest).
+ * Returns /Prev offset to continue the chain, or -1 if chain ends.
+ *
+ * Type-0 entries → mark as free.
+ * Type-1 entries → direct byte-offset (normal object).
+ * Type-2 entries → object lives inside an ObjStm; set offset sentinel -1 so
+ *                  the slot is "claimed" and build_xref_by_scan won't overwrite
+ *                  it.  extract_all_objstm() will populate pdf->extracted later.
+ */
+static long long
+parse_one_xref_stream(PDF *pdf, long long xpos)
+{
+    if (xpos < 0 || xpos + 10 > pdf->size) return -1;
+
+    /* Locate the "obj" keyword within a short window from xpos */
+    long long head_avail = pdf->size - xpos;
+    if (head_avail > 256) head_avail = 256;
+    const unsigned char *obj_kw =
+        my_memmem(pdf->data + xpos, (size_t)head_avail, " obj", 4);
+    if (!obj_kw) return -1;
+
+    /* Dict starts right after "obj" + optional whitespace */
+    const unsigned char *dict_start = obj_kw + 4;
+    while (dict_start < pdf->data + pdf->size &&
+           (*dict_start == '\r' || *dict_start == '\n' || *dict_start == ' '))
+        dict_start++;
+    if (dict_start >= pdf->data + pdf->size || *dict_start != '<') return -1;
+
+    /* Find "stream" keyword to delimit the dictionary */
+    long long dict_avail = pdf->size - (dict_start - pdf->data);
+    if (dict_avail > 32768) dict_avail = 32768;
+    const unsigned char *stream_kw =
+        my_memmem(dict_start, (size_t)dict_avail, "stream", 6);
+    if (!stream_kw) return -1;
+    int dict_len = (int)(stream_kw - dict_start);
+
+    /* /W array — three integers [w0 w1 w2]; w0 default 1, w1 must be >0, w2 default 0 */
+    int w0 = 1, w1 = 4, w2 = 0;
+    const unsigned char *wp = my_memmem(dict_start, (size_t)dict_len, "/W", 2);
+    if (wp) {
+        long long wpos = (wp - dict_start) + 2;
+        while (wpos < dict_len && dict_start[wpos] != '[') wpos++;
+        if (wpos < dict_len && dict_start[wpos] == '[') {
+            wpos++;
+            w0 = (int)read_int(dict_start, dict_len, &wpos);
+            w1 = (int)read_int(dict_start, dict_len, &wpos);
+            w2 = (int)read_int(dict_start, dict_len, &wpos);
+        }
+    }
+    if (w1 <= 0 || w1 > 8) return -1;
+
+    /* /Size */
+    int xref_sz = dict_get_int(dict_start, dict_len, "Size");
+    if (xref_sz <= 0 || !xref_ensure(pdf, xref_sz)) return -1;
+
+    /* /Index pairs [first count ...]; default [0 Size] */
+    int index_pairs[512];
+    int n_pairs = 0;
+    const unsigned char *idxp = my_memmem(dict_start, (size_t)dict_len, "/Index", 6);
+    if (idxp) {
+        long long ipos = (idxp - dict_start) + 6;
+        while (ipos < dict_len && dict_start[ipos] != '[') ipos++;
+        if (ipos < dict_len && dict_start[ipos] == '[') {
+            ipos++;
+            while (ipos < dict_len && dict_start[ipos] != ']' && n_pairs < 510) {
+                skip_ws(dict_start, dict_len, &ipos);
+                if (dict_start[ipos] == ']') break;
+                if (!isdigit(dict_start[ipos])) { ipos++; continue; }
+                index_pairs[n_pairs++] = (int)read_int(dict_start, dict_len, &ipos);
+            }
+        }
+    }
+    if (n_pairs == 0 || (n_pairs & 1)) {
+        index_pairs[0] = 0; index_pairs[1] = xref_sz; n_pairs = 2;
+    }
+
+    /* Stream body */
+    int stream_length = dict_get_int(dict_start, dict_len, "Length");
+    const unsigned char *stream_body = stream_kw + 6;
+    if (stream_body < pdf->data + pdf->size && *stream_body == '\r') stream_body++;
+    if (stream_body < pdf->data + pdf->size && *stream_body == '\n') stream_body++;
+    long long body_avail = pdf->size - (stream_body - pdf->data);
+    if (stream_length <= 0 || stream_length > (int)body_avail)
+        stream_length = (int)body_avail;
+
+    /* Decompress if FlateDecode */
+    int is_flate =
+        (my_memmem(dict_start, (size_t)dict_len, "FlateDecode", 11) != NULL ||
+         my_memmem(dict_start, (size_t)dict_len, "/Fl\n",       4)  != NULL ||
+         my_memmem(dict_start, (size_t)dict_len, "/Fl ",        4)  != NULL);
+
+    const unsigned char *xref_data     = stream_body;
+    int                  xref_data_len = stream_length;
+    unsigned char       *decomp_buf    = NULL;
+
+    if (is_flate) {
+        int dl;
+        decomp_buf = flate_decompress(stream_body, stream_length, &dl);
+        if (!decomp_buf || dl < 0) { free(decomp_buf); return -1; }
+        xref_data     = decomp_buf;
+        xref_data_len = dl;
+    }
+
+    /* Parse binary entries */
+    int       entry_size = w0 + w1 + w2;
+    long long dpos       = 0;
+    if (entry_size <= 0) { free(decomp_buf); return -1; }
+
+    for (int pi = 0; pi + 1 < n_pairs; pi += 2) {
+        int seg_first = index_pairs[pi];
+        int seg_count = index_pairs[pi + 1];
+        if (!xref_ensure(pdf, seg_first + seg_count)) break;
+        for (int ii = 0; ii < seg_count; ii++) {
+            if (dpos + entry_size > xref_data_len) goto xrs_done;
+
+            long long f1 = (w0 > 0) ? xref_read_field(xref_data, w0, &dpos) : 1;
+            long long f2 =             xref_read_field(xref_data, w1, &dpos);
+            long long f3 = (w2 > 0) ? xref_read_field(xref_data, w2, &dpos) : 0;
+
+            int obj_idx = seg_first + ii;
+            /* First-wins: skip if slot already occupied */
+            if (pdf->xref[obj_idx].offset != 0 || pdf->xref[obj_idx].free) continue;
+
+            if (f1 == 0) {
+                /* Type 0: free object */
+                pdf->xref[obj_idx].free = 1;
+            } else if (f1 == 1) {
+                /* Type 1: uncompressed at byte offset f2, gen f3 */
+                pdf->xref[obj_idx].offset = (long long)f2;
+                pdf->xref[obj_idx].gen    = (int)f3;
+            } else if (f1 == 2) {
+                /* Type 2: compressed in ObjStm f2, index f3.
+                   Set sentinel offset -1 so build_xref_by_scan skips this slot.
+                   extract_all_objstm() will populate pdf->extracted instead. */
+                pdf->xref[obj_idx].offset = -1;
+                pdf->xref[obj_idx].gen    = 0;
+            }
+        }
+    }
+xrs_done:;
+
+    long long prev = dict_get_prev(dict_start, dict_len);
+    free(decomp_buf);
+    return prev;
+}
+
+/* Extract /Prev from the trailer dict that follows an "xref" table at `xpos`.
+   Scans forward from xpos for the "trailer" keyword. Returns -1 if not found. */
+static long long
+parse_trailer_prev(PDF *pdf, long long xpos)
+{
+    if (xpos < 0) return -1;
+    long long limit = xpos + 262144;          /* shouldn't be further than 256 KB away */
+    if (limit > pdf->size - 7) limit = pdf->size - 7;
+    const unsigned char *p =
+        my_memmem(pdf->data + xpos, (size_t)(limit - xpos + 7), "trailer", 7);
+    if (!p) return -1;
+    long long tpos = (p - pdf->data) + 7;
+    skip_ws(pdf->data, pdf->size, &tpos);
+    if (tpos + 1 >= pdf->size) return -1;
+    /* Walk to end of trailer dict */
+    int depth = 0;
+    long long dp = tpos;
+    while (dp + 1 < pdf->size) {
+        if (pdf->data[dp] == '<' && pdf->data[dp + 1] == '<') { depth++; dp += 2; }
+        else if (pdf->data[dp] == '>' && pdf->data[dp + 1] == '>') {
+            if (--depth == 0) { dp += 2; break; }
+            dp += 2;
+        } else dp++;
+    }
+    return dict_get_prev(pdf->data + tpos, (int)(dp - tpos));
+}
+
 /* Parse the xref table (or fall back to full-file scan) and find /Root.
    Fills pdf->xref, pdf->xref_size, pdf->catalog_num.
    Returns 0 on success. */
@@ -312,11 +527,44 @@ parse_xref(PDF *pdf)
 
     long long xpos = get_startxref(pdf->data, pdf->size);
 
-    if (!try_parse_standard_xref(pdf, xpos)) {
-        /* PDF 1.5+ compressed xref stream, or broken/non-standard file —
-           fall back to scanning the whole file for object headers. */
-        build_xref_by_scan(pdf);
+    if (xpos >= 0) {
+        /* Walk the entire xref chain newest → oldest.
+         * Each iteration parses one xref section (table or stream) and
+         * follows /Prev to the previous one.  Because we process newest
+         * first and both parsers use first-wins semantics, the most recent
+         * version of every object (the one after signing / incremental
+         * updates) is always the one that lands in pdf->xref. */
+        long long visited[64];
+        int n_visited = 0;
+        long long cur = xpos;
+
+        while (cur >= 0 && n_visited < 64) {
+            /* Cycle guard */
+            int loop = 0;
+            for (int vi = 0; vi < n_visited; vi++)
+                if (visited[vi] == cur) { loop = 1; break; }
+            if (loop) break;
+            visited[n_visited++] = cur;
+
+            long long prev;
+            if (cur + 4 <= pdf->size &&
+                memcmp(pdf->data + cur, "xref", 4) == 0) {
+                /* Standard plain-text xref table */
+                try_parse_standard_xref(pdf, cur);
+                prev = parse_trailer_prev(pdf, cur);
+            } else {
+                /* PDF 1.5+ compressed xref stream (also used by signed PDFs) */
+                prev = parse_one_xref_stream(pdf, cur);
+            }
+            cur = prev;
+        }
     }
+
+    /* Supplement with a full-file object scan.
+     * This catches objects that are genuinely missing from the xref chain
+     * (malformed PDFs, partially-written files) without overwriting entries
+     * already populated by the chain walk above. */
+    build_xref_by_scan(pdf);
 
     find_catalog_num(pdf);
 

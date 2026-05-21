@@ -77,6 +77,8 @@
 #define ID_BTN_ARR_DN       142
 #define ID_BTN_ARR_X        143
 
+#define MAX_ARR_FILES 512   /* max PDFs in the Arrange list */
+
 #define IDI_APPICON   1
 #define IDR_LOGO_PNG  101
 
@@ -1172,13 +1174,15 @@ static void do_run_merge(void)
     char err[256]; int count;
     char **pdfs=extract_zip_pdfs(g_zipPath,temp_dir,&count,err,sizeof(err));
     if (!pdfs) {
-        RemoveDirectoryA(out_folder); /* clean up empty folder */
+        RemoveDirectoryA(out_folder);
         MessageBoxA(g_hwnd,err,"Error",MB_ICONERROR|MB_OK);
         RemoveDirectoryA(temp_dir); return; }
 
     int rc=pdf_merge_files((const char**)pdfs,count,out_path,err,sizeof(err));
+
     for (int i=0;i<count;i++) { DeleteFileA(pdfs[i]); free(pdfs[i]); }
-    free(pdfs); RemoveDirectoryA(temp_dir);
+    free(pdfs);
+    RemoveDirectoryA(temp_dir);
 
     if (rc!=0) {
         RemoveDirectoryA(out_folder);
@@ -1220,7 +1224,7 @@ static void do_run_split(void)
     char err[256];
     int n=pdf_split_file(g_splitPdfPath,out_folder,err,sizeof(err));
     if (n<0) {
-        RemoveDirectoryA(out_folder); /* clean up empty folder on failure */
+        RemoveDirectoryA(out_folder);
         MessageBoxA(g_hwnd,err,"Split Failed",MB_ICONERROR|MB_OK); }
     else {
         char msg[MAX_PATH+64];
@@ -1233,7 +1237,6 @@ static void do_run_split(void)
  * ARRANGE SCREEN — DATA MODEL
  * ============================================================ */
 
-#define MAX_ARR_FILES 512
 static char g_arr_paths[MAX_ARR_FILES][MAX_PATH];
 static int  g_arr_count    = 0;
 static int  g_arr_sort_dir = 1;   /* 1 = A→Z, 0 = Z→A */
@@ -1487,6 +1490,7 @@ static void do_run_arrange(void)
     const char **paths = (const char**)malloc(g_arr_count * sizeof(char*));
     if (!paths) { RemoveDirectoryA(out_folder); return; }
     for (int i = 0; i < g_arr_count; i++) paths[i] = g_arr_paths[i];
+
     char err[256];
     int rc = pdf_merge_files(paths, g_arr_count, out_path, err, sizeof(err));
     free(paths);
