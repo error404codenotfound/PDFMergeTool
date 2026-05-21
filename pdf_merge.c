@@ -1214,6 +1214,7 @@ fail:
  * ============================================================ */
 
 int pdf_split_file(const char *input_path, const char *output_dir,
+                   const char *base_name,
                    char *err_buf, int err_buf_size)
 {
     PDF pdf;
@@ -1271,9 +1272,31 @@ int pdf_split_file(const char *input_path, const char *output_dir,
         return -1;
     }
 
+    /* Determine the base name used for each output file.
+     * If the caller supplied a non-empty base_name use it; otherwise derive
+     * one from the input filename (strip directory and .pdf extension). */
+    char file_base[512];
+    if (base_name && base_name[0]) {
+        strncpy(file_base, base_name, sizeof(file_base) - 1);
+        file_base[sizeof(file_base) - 1] = 0;
+    } else {
+        /* Extract filename from input_path */
+        const char *fn = input_path;
+        const char *sl = strrchr(input_path, '\\');
+        if (!sl) sl = strrchr(input_path, '/');
+        if (sl) fn = sl + 1;
+        strncpy(file_base, fn, sizeof(file_base) - 1);
+        file_base[sizeof(file_base) - 1] = 0;
+        /* Strip .pdf extension */
+        int fblen = (int)strlen(file_base);
+        if (fblen > 4 && _stricmp(file_base + fblen - 4, ".pdf") == 0)
+            file_base[fblen - 4] = 0;
+    }
+
     for (int p = 0; p < n_pages; p++) {
         char out_path[1024];
-        snprintf(out_path, sizeof(out_path), "%s\\page_%03d.pdf", output_dir, p + 1);
+        snprintf(out_path, sizeof(out_path), "%s\\%s-pg%03d.pdf",
+                 output_dir, file_base, p + 1);
 
         FILE *out = fopen(out_path, "wb");
         if (!out) {

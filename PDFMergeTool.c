@@ -59,11 +59,15 @@
 #define ID_CHK_DELZIP       113
 #define ID_CHK_OPENDIR      114
 #define ID_BTN_RUN_MERGE    115
+#define ID_LST_MERGE_PDFS   116
+#define ID_BTN_MERGE_UP     117
+#define ID_BTN_MERGE_DN     118
 #define ID_DROP_SPLIT       120
 #define ID_EDIT_SPLIT_DIR   121
 #define ID_BTN_SPLIT_BROWSE 122
 #define ID_BTN_RUN_SPLIT    123
 #define ID_BTN_BACK_SPLIT   124
+#define ID_EDIT_SPLIT_NAME  125
 #define ID_LST_PDFS         130
 #define ID_BTN_ADD_PDFS     131
 #define ID_BTN_MOVE_UP      132
@@ -76,6 +80,7 @@
 #define ID_BTN_ARR_UP       141
 #define ID_BTN_ARR_DN       142
 #define ID_BTN_ARR_X        143
+#define ID_BTN_ARR_CLEAR    144
 
 #define MAX_ARR_FILES 512   /* max PDFs in the Arrange list */
 
@@ -139,17 +144,26 @@ static HWND  g_hDropArea, g_hDropLabel, g_hEditOutName;
 static HWND  g_hChkDelZip, g_hChkOpenDir, g_hBtnRunMerge, g_hBtnBack;
 static char  g_zipPath[MAX_PATH] = "";
 
+/* Merge screen — file-order list */
+static HWND       g_hListMergePDFs = NULL;
+static HWND       g_hBtnMergeUp    = NULL;
+static HWND       g_hBtnMergeDn    = NULL;
+static HIMAGELIST g_hMergeImgList  = NULL;
+static int        g_merge_sort_dir = -1;  /* -1=custom, 1=A-Z, 0=Z-A */
+
 /* Split screen */
 static HWND  g_hDropSplit, g_hDropLabelSplit, g_hEditSplitDir;
 static HWND  g_hBtnSplitBrowse, g_hBtnRunSplit, g_hBtnBackSplit;
+static HWND  g_hEditSplitName;   /* optional custom base name for split pages */
 static char  g_splitPdfPath[MAX_PATH] = "";
 
 /* Arrange screen */
 static HWND  g_hListPDFs;
 static HWND  g_hBtnAddPDFs;
-static HWND  g_hBtnArrUp  = NULL;   /* single ↑ / ↓ / ✕ for selected row */
-static HWND  g_hBtnArrDn  = NULL;
-static HWND  g_hBtnArrX   = NULL;
+static HWND  g_hBtnArrUp    = NULL;   /* single ↑ / ↓ / ✕ for selected row */
+static HWND  g_hBtnArrDn    = NULL;
+static HWND  g_hBtnArrX     = NULL;
+static HWND  g_hBtnArrClear = NULL;   /* clears all files from the list */
 static HWND  g_hEditArrOut, g_hChkArrOpen, g_hBtnRunArr, g_hBtnBackArr;
 static HIMAGELIST g_hArrImgList = NULL;
 
@@ -230,11 +244,18 @@ static void apply_dark_titlebar(HWND hwnd)
 
 static void apply_listview_theme(void)
 {
-    if (!g_hListPDFs) return;
-    ListView_SetBkColor(g_hListPDFs,     C_SUB_BG);
-    ListView_SetTextBkColor(g_hListPDFs, C_SUB_BG);
-    ListView_SetTextColor(g_hListPDFs,   C_TEXT);
-    InvalidateRect(g_hListPDFs, NULL, TRUE);
+    if (g_hListPDFs) {
+        ListView_SetBkColor(g_hListPDFs,     C_SUB_BG);
+        ListView_SetTextBkColor(g_hListPDFs, C_SUB_BG);
+        ListView_SetTextColor(g_hListPDFs,   C_TEXT);
+        InvalidateRect(g_hListPDFs, NULL, TRUE);
+    }
+    if (g_hListMergePDFs) {
+        ListView_SetBkColor(g_hListMergePDFs,     C_SUB_BG);
+        ListView_SetTextBkColor(g_hListMergePDFs, C_SUB_BG);
+        ListView_SetTextColor(g_hListMergePDFs,   C_TEXT);
+        InvalidateRect(g_hListMergePDFs, NULL, TRUE);
+    }
 }
 
 /* ============================================================
@@ -363,33 +384,46 @@ static void reposition_controls(int cw, int ch)
 {
     int mx = 60, drop_w = cw - mx * 2;
 
-    /* Merge */
+    /* Merge — compact ZIP bar at top, sortable file list below */
     {
-        int drop_y = 130, drop_h = 128;
-        int lbl_y  = drop_y + drop_h + 14;
-        int edit_x = mx + 152, edit_w = cw - edit_x - mx;
-        int chk_y  = lbl_y + 34;
-        int btn_y  = chk_y + 66;
-        MoveWindow(g_hDropArea,    mx, drop_y, drop_w, drop_h, TRUE);
-        MoveWindow(g_hDropLabel,   mx, drop_y, drop_w, drop_h, TRUE);
-        MoveWindow(g_hEditOutName, edit_x, lbl_y, edit_w, 26,  TRUE);
-        int chk_w = 280, chk_x = (cw - chk_w) / 2;
-        MoveWindow(g_hChkDelZip,   chk_x, chk_y,      chk_w, 22, TRUE);
-        MoveWindow(g_hChkOpenDir,  chk_x, chk_y + 28, chk_w, 22, TRUE);
-        MoveWindow(g_hBtnRunMerge, (cw-200)/2, btn_y, 200, 44, TRUE);
-        MoveWindow(g_hBtnBack,     14, 14, 80, 30, TRUE);
+        int drop_y  = 120, drop_h = 100;          /* compact ZIP source bar      */
+        int list_y  = drop_y + drop_h + 8;        /* file-order ListView         */
+        int list_h  = ch - list_y - 196;
+        if (list_h > 220) list_h = 220;
+        if (list_h < 80)  list_h = 80;
+        int add_y   = list_y + list_h + 6;        /* row with ↑/↓ buttons        */
+        int out_y   = add_y  + 36;                /* Output PDF Name             */
+        int chk_y   = out_y  + 32;                /* checkboxes                  */
+        int run_y   = chk_y  + 56;                /* MERGE button                */
+        int edit_x  = mx + 152, edit_w = cw - edit_x - mx;
+        int chk_w   = 280, chk_x = (cw - chk_w) / 2;
+        int btn3_r  = mx + drop_w;               /* right edge of the list area  */
+
+        MoveWindow(g_hDropArea,      mx, drop_y, drop_w, drop_h, TRUE);
+        MoveWindow(g_hDropLabel,     mx, drop_y, drop_w, drop_h, TRUE);
+        MoveWindow(g_hListMergePDFs, mx, list_y, drop_w, list_h, TRUE);
+        ListView_SetColumnWidth(g_hListMergePDFs, 0, drop_w - 4);
+        MoveWindow(g_hBtnMergeDn,    btn3_r-36,    add_y, 32, 28, TRUE);  /* ↓ */
+        MoveWindow(g_hBtnMergeUp,    btn3_r-36-38, add_y, 32, 28, TRUE);  /* ↑ */
+        MoveWindow(g_hEditOutName,   edit_x, out_y, edit_w, 26, TRUE);
+        MoveWindow(g_hChkDelZip,     chk_x, chk_y,      chk_w, 22, TRUE);
+        MoveWindow(g_hChkOpenDir,    chk_x, chk_y + 28, chk_w, 22, TRUE);
+        MoveWindow(g_hBtnRunMerge,   (cw-200)/2, run_y, 200, 44, TRUE);
+        MoveWindow(g_hBtnBack,       14, 14, 80, 30, TRUE);
     }
 
     /* Split */
     {
-        int drop_y = 80, drop_h = 110;
-        int lbl_y  = drop_y + drop_h + 14;
-        int edit_x = mx + 130, edit_w = cw - edit_x - mx - 96;
-        int btn_y  = lbl_y + 52;
+        int drop_y  = 80, drop_h = 110;
+        int dir_y   = drop_y + drop_h + 14;          /* Output Folder row */
+        int name_y  = dir_y + 34;                    /* Page Name row     */
+        int btn_y   = name_y + 40;                   /* SPLIT button      */
+        int edit_x  = mx + 130, edit_w = cw - edit_x - mx - 96;
         MoveWindow(g_hDropSplit,      mx, drop_y, drop_w, drop_h, TRUE);
         MoveWindow(g_hDropLabelSplit, mx, drop_y, drop_w, drop_h, TRUE);
-        MoveWindow(g_hEditSplitDir,   edit_x, lbl_y, edit_w, 26, TRUE);
-        MoveWindow(g_hBtnSplitBrowse, edit_x+edit_w+6, lbl_y, 84, 26, TRUE);
+        MoveWindow(g_hEditSplitDir,   edit_x, dir_y,  edit_w, 26, TRUE);
+        MoveWindow(g_hBtnSplitBrowse, edit_x+edit_w+6, dir_y, 84, 26, TRUE);
+        MoveWindow(g_hEditSplitName,  edit_x, name_y, edit_w+90, 26, TRUE);
         MoveWindow(g_hBtnRunSplit,    (cw-200)/2, btn_y, 200, 44, TRUE);
         MoveWindow(g_hBtnBackSplit,   14, 14, 80, 30, TRUE);
     }
@@ -409,7 +443,8 @@ static void reposition_controls(int cw, int ch)
         MoveWindow(g_hListPDFs,   mx, list_y, drop_w, list_h, TRUE);
         ListView_SetColumnWidth(g_hListPDFs, 0, drop_w - 4);
         /* Add Files on the left, ↑ ↓ ✕ grouped on the right of that row */
-        MoveWindow(g_hBtnAddPDFs, mx, add_y, 130, 32, TRUE);
+        MoveWindow(g_hBtnAddPDFs,  mx,      add_y, 130, 32, TRUE);
+        MoveWindow(g_hBtnArrClear, mx+136,  add_y, 100, 32, TRUE);
         int btn3_r = mx + drop_w;  /* right edge of the list */
         MoveWindow(g_hBtnArrX,    btn3_r-36,       add_y, 32, 32, TRUE);
         MoveWindow(g_hBtnArrDn,   btn3_r-36-38,    add_y, 32, 32, TRUE);
@@ -432,9 +467,10 @@ static void hide_all_screens(void)
     HWND ctrls[] = {
         g_hDropArea, g_hDropLabel, g_hEditOutName, g_hChkDelZip,
         g_hChkOpenDir, g_hBtnRunMerge, g_hBtnBack,
+        g_hListMergePDFs, g_hBtnMergeUp, g_hBtnMergeDn,
         g_hDropSplit, g_hDropLabelSplit, g_hEditSplitDir,
-        g_hBtnSplitBrowse, g_hBtnRunSplit, g_hBtnBackSplit,
-        g_hListPDFs, g_hBtnAddPDFs,
+        g_hBtnSplitBrowse, g_hBtnRunSplit, g_hBtnBackSplit, g_hEditSplitName,
+        g_hListPDFs, g_hBtnAddPDFs, g_hBtnArrClear,
         g_hBtnArrUp, g_hBtnArrDn, g_hBtnArrX,
         g_hEditArrOut, g_hChkArrOpen,
         g_hBtnRunArr, g_hBtnBackArr, NULL
@@ -449,20 +485,25 @@ static void show_screen(int scr)
     g_screen = scr;
     switch (scr) {
     case SCR_MERGE:
-        ShowWindow(g_hDropArea,    SW_SHOW); ShowWindow(g_hDropLabel,   SW_SHOW);
-        ShowWindow(g_hEditOutName, SW_SHOW); ShowWindow(g_hChkDelZip,   SW_SHOW);
-        ShowWindow(g_hChkOpenDir,  SW_SHOW); ShowWindow(g_hBtnRunMerge, SW_SHOW);
-        ShowWindow(g_hBtnBack,     SW_SHOW);
+        ShowWindow(g_hDropArea,      SW_SHOW); ShowWindow(g_hDropLabel,      SW_SHOW);
+        ShowWindow(g_hListMergePDFs, SW_SHOW); ShowWindow(g_hBtnMergeUp, SW_SHOW);
+        ShowWindow(g_hBtnMergeDn,    SW_SHOW);
+        ShowWindow(g_hEditOutName,   SW_SHOW); ShowWindow(g_hChkDelZip,      SW_SHOW);
+        ShowWindow(g_hChkOpenDir,    SW_SHOW); ShowWindow(g_hBtnRunMerge,    SW_SHOW);
+        ShowWindow(g_hBtnBack,       SW_SHOW);
+        apply_listview_theme();
         break;
     case SCR_SPLIT:
         ShowWindow(g_hDropSplit,      SW_SHOW); ShowWindow(g_hDropLabelSplit, SW_SHOW);
         ShowWindow(g_hEditSplitDir,   SW_SHOW); ShowWindow(g_hBtnSplitBrowse, SW_SHOW);
+        ShowWindow(g_hEditSplitName,  SW_SHOW);
         ShowWindow(g_hBtnRunSplit,    SW_SHOW); ShowWindow(g_hBtnBackSplit,   SW_SHOW);
         break;
     case SCR_ARRANGE:
-        ShowWindow(g_hListPDFs,   SW_SHOW); ShowWindow(g_hBtnAddPDFs, SW_SHOW);
-        ShowWindow(g_hBtnArrUp,   SW_SHOW); ShowWindow(g_hBtnArrDn,   SW_SHOW);
-        ShowWindow(g_hBtnArrX,    SW_SHOW);
+        ShowWindow(g_hListPDFs,    SW_SHOW); ShowWindow(g_hBtnAddPDFs,   SW_SHOW);
+        ShowWindow(g_hBtnArrClear, SW_SHOW);
+        ShowWindow(g_hBtnArrUp,    SW_SHOW); ShowWindow(g_hBtnArrDn,     SW_SHOW);
+        ShowWindow(g_hBtnArrX,     SW_SHOW);
         ShowWindow(g_hEditArrOut, SW_SHOW); ShowWindow(g_hChkArrOpen, SW_SHOW);
         ShowWindow(g_hBtnRunArr,  SW_SHOW); ShowWindow(g_hBtnBackArr, SW_SHOW);
         apply_listview_theme();
@@ -800,31 +841,28 @@ static void on_paint_merge(HDC hdc, RECT *client)
               DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     SelectObject(hdc, oldf);
 
-    /* Drop zone */
+    /* Compact ZIP source bar — border + single-line text, no icon */
     RECT dr = control_rect(g_hDropArea);
     draw_drop_zone(hdc, &dr);
-
-    /* Hint / selected-file text — centred both axes inside the drop zone.
-     * Icon base is at zone_cy-10 (cy=zone_cy-26, base=cy+16).
-     * Text starts 8 px below icon base = zone_cy - 2. */
     {
-        int zone_cy = (dr.top + dr.bottom) / 2;
-        int text_top = zone_cy - 2;
-        RECT tr = {dr.left+20, text_top, dr.right-20, dr.bottom-8};
+        /* Text drawn in the lower portion of the compact bar (below icon area) */
+        RECT tr = {dr.left+16, dr.top+18, dr.right-16, dr.bottom-4};
         SetBkMode(hdc, TRANSPARENT);
         SelectObject(hdc, g_fntBody);
         if (g_zipPath[0]) {
+            char label[MAX_PATH + 8];
+            snprintf(label, sizeof(label), "ZIP: %s", PathFindFileNameA(g_zipPath));
             SetTextColor(hdc, C_TEXT);
-            DrawTextA(hdc, PathFindFileNameA(g_zipPath), -1, &tr,
+            DrawTextA(hdc, label, -1, &tr,
                 DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
         } else {
             SetTextColor(hdc, C_DROP_TEXT);
-            DrawTextA(hdc, "Drag and drop ZIP file here\nor click to browse...", -1, &tr,
-                DT_CENTER|DT_WORDBREAK|DT_NOPREFIX);
+            DrawTextA(hdc, "Drop ZIP file here  \xb7\xb7\xb7  or click to browse",
+                -1, &tr, DT_CENTER|DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
         }
     }
 
-    /* "Output PDF Name:" label */
+    /* "Output PDF Name:" label — positioned relative to the edit control */
     RECT er = control_rect(g_hEditOutName);
     oldf = SelectObject(hdc, g_fntBody);
     SetTextColor(hdc, C_TEXT);
@@ -875,11 +913,17 @@ static void on_paint_split(HDC hdc, RECT *client)
         }
     }
 
-    RECT er = control_rect(g_hEditSplitDir);
     oldf = SelectObject(hdc, g_fntBody);
     SetTextColor(hdc, C_TEXT);
+
+    RECT er = control_rect(g_hEditSplitDir);
     RECT lbl = { 60, er.top, er.left-4, er.bottom };
     DrawTextA(hdc, "Output Folder:", -1, &lbl, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT nr = control_rect(g_hEditSplitName);
+    RECT nlbl = { 60, nr.top, nr.left-4, nr.bottom };
+    DrawTextA(hdc, "File Name:", -1, &nlbl, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
     SelectObject(hdc, oldf);
 }
 
@@ -997,14 +1041,35 @@ static void create_all_controls(HWND hwnd)
     g_hBtnRunMerge = mk_action_btn(hwnd,ID_BTN_RUN_MERGE,"MERGE",350,376,200,44);
     g_hBtnBack     = mk_back_btn(hwnd,ID_BTN_BACK,14,14,80,30);
 
+    /* Merge — file-order ListView */
+    g_hListMergePDFs = CreateWindowExA(WS_EX_STATICEDGE, WC_LISTVIEWA, "",
+        WS_CHILD|WS_TABSTOP|WS_VSCROLL|LVS_REPORT|LVS_SHOWSELALWAYS|LVS_SINGLESEL,
+        80,186,740,200, hwnd, (HMENU)(INT_PTR)ID_LST_MERGE_PDFS, NULL, NULL);
+    set_font_all(g_hListMergePDFs, g_fntBody);
+    ListView_SetExtendedListViewStyle(g_hListMergePDFs, LVS_EX_FULLROWSELECT);
+    g_hMergeImgList = ImageList_Create(1, 26, ILC_COLOR32, 0, 1);
+    ListView_SetImageList(g_hListMergePDFs, g_hMergeImgList, LVSIL_SMALL);
+    {
+        LVCOLUMNA col; memset(&col, 0, sizeof(col));
+        col.mask = LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM;
+        col.cx   = 736; col.pszText = "File   (click header to sort  |  drag or use arrows to reorder)"; col.iSubItem = 0;
+        ListView_InsertColumn(g_hListMergePDFs, 0, &col);
+    }
+    g_hBtnMergeUp = mk_action_btn(hwnd, ID_BTN_MERGE_UP, "", 80,  394, 32, 28);
+    g_hBtnMergeDn = mk_action_btn(hwnd, ID_BTN_MERGE_DN, "", 118, 394, 32, 28);
+
     /* Split */
     g_hDropSplit      = mk_drop_area(hwnd,ID_DROP_SPLIT,80,80,740,110);
     g_hDropLabelSplit = CreateWindowA("STATIC","",WS_CHILD|SS_CENTER,
                                       80,80,740,110,hwnd,NULL,NULL,NULL);
     set_font_all(g_hDropLabelSplit, g_fntBody);
-    g_hEditSplitDir   = mk_edit(hwnd,ID_EDIT_SPLIT_DIR,210,204,474,26);
+    g_hEditSplitDir   = mk_edit(hwnd,ID_EDIT_SPLIT_DIR, 210,204,474,26);
     g_hBtnSplitBrowse = mk_btn(hwnd,ID_BTN_SPLIT_BROWSE,"Browse...",690,204,84,26,g_fntBody);
-    g_hBtnRunSplit    = mk_action_btn(hwnd,ID_BTN_RUN_SPLIT,"SPLIT",350,260,200,44);
+    g_hEditSplitName  = mk_edit(hwnd,ID_EDIT_SPLIT_NAME,210,238,558,26);
+    /* Placeholder text shown when the field is empty */
+    SendMessageW(g_hEditSplitName, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)L"leave blank to use original PDF filename");
+    g_hBtnRunSplit    = mk_action_btn(hwnd,ID_BTN_RUN_SPLIT,"SPLIT",350,296,200,44);
     g_hBtnBackSplit   = mk_back_btn(hwnd,ID_BTN_BACK_SPLIT,14,14,80,30);
 
     /* Arrange */
@@ -1021,7 +1086,7 @@ static void create_all_controls(HWND hwnd)
     {
         LVCOLUMNA col; memset(&col,0,sizeof(col));
         col.mask=LVCF_TEXT|LVCF_WIDTH|LVCF_SUBITEM;
-        col.cx=736; col.pszText="File"; col.iSubItem=0;
+        col.cx=736; col.pszText="File   (click header to sort  |  drag or use arrows to reorder)"; col.iSubItem=0;
         ListView_InsertColumn(g_hListPDFs,0,&col);
     }
 
@@ -1030,7 +1095,8 @@ static void create_all_controls(HWND hwnd)
     g_hBtnArrDn = mk_action_btn(hwnd,ID_BTN_ARR_DN,"",118, 380,32,32);
     g_hBtnArrX  = mk_action_btn(hwnd,ID_BTN_ARR_X, "",156, 380,32,32);
 
-    g_hBtnAddPDFs = mk_btn(hwnd,ID_BTN_ADD_PDFS,"+ Add Files",80,380,130,28,g_fntBody);
+    g_hBtnAddPDFs   = mk_btn(hwnd,ID_BTN_ADD_PDFS,  "+ Add Files",  80,380,130,28,g_fntBody);
+    g_hBtnArrClear  = mk_btn(hwnd,ID_BTN_ARR_CLEAR, "Clear All",   216,380,100,28,g_fntBody);
     g_hEditArrOut = mk_edit(hwnd,ID_EDIT_ARR_OUT,232,418,488,26);
     g_hChkArrOpen = mk_check(hwnd,ID_CHK_ARR_OPEN,"Open output folder when done",80,452,310,22);
     g_hBtnRunArr  = mk_action_btn(hwnd,ID_BTN_RUN_ARR,"MERGE",350,484,200,44);
@@ -1068,6 +1134,166 @@ static BOOL make_unique_folder(const char *base_dir, const char *name,
             return CreateDirectoryA(out_path, NULL);
     }
     return FALSE;
+}
+
+/* ============================================================
+ * MERGE SCREEN — FILE ORDER DATA MODEL
+ * ============================================================ */
+
+#define MAX_MERGE_FILES 512
+
+static char g_merge_names[MAX_MERGE_FILES][MAX_PATH]; /* PDF basenames from ZIP, user-ordered */
+static int  g_merge_count    = 0;
+static int  g_merge_dragging = -1;
+static int  g_merge_drag_tgt = -1;
+
+static int cmp_merge_name(const void *a, const void *b)
+{ return _stricmp((const char *)a, (const char *)b); }
+
+static void merge_swap(int a, int b)
+{
+    char tmp[MAX_PATH];
+    memcpy(tmp,               g_merge_names[a], MAX_PATH);
+    memcpy(g_merge_names[a],  g_merge_names[b], MAX_PATH);
+    memcpy(g_merge_names[b],  tmp,               MAX_PATH);
+}
+
+static void merge_refresh_list(int sel_idx)
+{
+    ListView_DeleteAllItems(g_hListMergePDFs);
+    for (int i = 0; i < g_merge_count; i++) {
+        LVITEMA lvi; memset(&lvi, 0, sizeof(lvi));
+        lvi.mask = LVIF_TEXT; lvi.iItem = i;
+        lvi.pszText = g_merge_names[i];
+        ListView_InsertItem(g_hListMergePDFs, &lvi);
+    }
+    if (sel_idx >= 0 && sel_idx < g_merge_count) {
+        ListView_SetItemState(g_hListMergePDFs, sel_idx,
+            LVIS_SELECTED|LVIS_FOCUSED, LVIS_SELECTED|LVIS_FOCUSED);
+        ListView_EnsureVisible(g_hListMergePDFs, sel_idx, FALSE);
+    }
+    InvalidateRect(g_hListMergePDFs, NULL, TRUE);
+}
+
+/* Sort g_merge_names per current g_merge_sort_dir (1=A-Z, 0=Z-A). */
+static void merge_sort(void)
+{
+    qsort(g_merge_names, g_merge_count, MAX_PATH, cmp_merge_name);
+    if (g_merge_sort_dir == 0) {
+        /* Reverse in-place for Z-A */
+        for (int i = 0, j = g_merge_count - 1; i < j; i++, j--) {
+            char tmp[MAX_PATH];
+            memcpy(tmp,               g_merge_names[i], MAX_PATH);
+            memcpy(g_merge_names[i],  g_merge_names[j], MAX_PATH);
+            memcpy(g_merge_names[j],  tmp,               MAX_PATH);
+        }
+    }
+}
+
+/* Update the merge ListView header text + native sort arrow to match g_merge_sort_dir. */
+static void merge_update_header(void)
+{
+    HWND hHdr = ListView_GetHeader(g_hListMergePDFs);
+    if (!hHdr) return;
+
+    char text[128];
+    DWORD fmt = HDF_LEFT | HDF_STRING;
+    if (g_merge_sort_dir == 1) {
+        strcpy(text, "A-Z   |   File");
+        fmt |= HDF_SORTUP;
+    } else if (g_merge_sort_dir == 0) {
+        strcpy(text, "Z-A   |   File");
+        fmt |= HDF_SORTDOWN;
+    } else {
+        strcpy(text, "File   (click header to sort  |  drag or use arrows to reorder)");
+    }
+
+    HDITEM hdi; memset(&hdi, 0, sizeof(hdi));
+    hdi.mask    = HDI_TEXT | HDI_FORMAT;
+    hdi.pszText = text;
+    hdi.cchTextMax = (int)strlen(text) + 1;
+    hdi.fmt     = (int)fmt;
+    Header_SetItem(hHdr, 0, &hdi);
+}
+
+/* Read PDF filenames from a ZIP (no extraction) and populate g_merge_names sorted A-Z. */
+static void load_zip_pdf_names(const char *zip_path)
+{
+    g_merge_count = 0;
+    mz_zip_archive zip; memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, zip_path, 0)) return;
+    int total = (int)mz_zip_reader_get_num_files(&zip);
+    for (int i = 0; i < total && g_merge_count < MAX_MERGE_FILES; i++) {
+        char name[MAX_PATH];
+        mz_zip_reader_get_filename(&zip, i, name, MAX_PATH);
+        int nlen = (int)strlen(name);
+        if (nlen < 4 || _stricmp(name + nlen - 4, ".pdf") != 0) continue;
+        /* Strip any directory prefix inside the ZIP */
+        const char *fname = name;
+        for (int j = nlen - 1; j >= 0; j--)
+            if (name[j] == '/' || name[j] == '\\') { fname = name + j + 1; break; }
+        if (!fname[0]) continue;
+        strncpy(g_merge_names[g_merge_count++], fname, MAX_PATH - 1);
+    }
+    mz_zip_reader_end(&zip);
+    /* Default sort: A-Z */
+    qsort(g_merge_names, g_merge_count, MAX_PATH, cmp_merge_name);
+    g_merge_sort_dir = 1;   /* reflect in header */
+}
+
+/* NM_CUSTOMDRAW for the merge file-order list */
+static LRESULT on_merge_customdraw(LPNMLVCUSTOMDRAW cd)
+{
+    switch (cd->nmcd.dwDrawStage) {
+
+    case CDDS_PREPAINT:
+        return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+
+    case CDDS_POSTPAINT:
+        if (g_merge_count == 0) {
+            HDC  hdc = cd->nmcd.hdc;
+            RECT cr;  GetClientRect(g_hListMergePDFs, &cr);
+            HWND hHdr = ListView_GetHeader(g_hListMergePDFs);
+            if (hHdr) { RECT hr; GetClientRect(hHdr, &hr); cr.top += (hr.bottom - hr.top); }
+            SetBkMode(hdc, TRANSPARENT);
+            SelectObject(hdc, g_fntBody);
+            SetTextColor(hdc, C_DROP_TEXT);
+            DrawTextA(hdc, "Load a ZIP file above to list its PDFs here",
+                -1, &cr, DT_CENTER|DT_VCENTER|DT_WORDBREAK|DT_NOPREFIX);
+        }
+        return CDRF_DODEFAULT;
+
+    case CDDS_ITEMPREPAINT: {
+        int  idx     = (int)cd->nmcd.dwItemSpec;
+        BOOL sel     = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+        BOOL is_drag = (g_merge_dragging >= 0 && idx == g_merge_dragging);
+
+        if (is_drag) {
+            HDC  hdc = cd->nmcd.hdc;
+            RECT r;   ListView_GetItemRect(g_hListMergePDFs, idx, &r, LVIR_BOUNDS);
+            COLORREF bg = g_dark ? RGB(20,44,95) : RGB(210,228,255);
+            HBRUSH hbr = CreateSolidBrush(bg); FillRect(hdc, &r, hbr); DeleteObject(hbr);
+            LOGBRUSH lb = {BS_SOLID, C_ACCENT, 0};
+            HPEN dp = ExtCreatePen(PS_GEOMETRIC|PS_DASH|PS_ENDCAP_FLAT, 1, &lb, 0, NULL);
+            HGDIOBJ op = SelectObject(hdc, dp);
+            HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+            Rectangle(hdc, r.left+1, r.top+1, r.right-1, r.bottom-2);
+            SelectObject(hdc, op); SelectObject(hdc, ob); DeleteObject(dp);
+            if (idx < g_merge_count) {
+                RECT tr = {r.left+10, r.top, r.right-8, r.bottom};
+                SetBkMode(hdc, TRANSPARENT); SelectObject(hdc, g_fntBody);
+                SetTextColor(hdc, C_ACCENT);
+                DrawTextA(hdc, g_merge_names[idx], -1, &tr,
+                    DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            }
+            return CDRF_SKIPDEFAULT;
+        }
+        if (sel)        { cd->clrText = C_BTN_FG; cd->clrTextBk = C_ACCENT; }
+        else if (idx&1) { cd->clrText = C_TEXT;   cd->clrTextBk = g_dark ? RGB(24,28,44) : RGB(246,248,254); }
+        else            { cd->clrText = C_TEXT;   cd->clrTextBk = C_SUB_BG; }
+        return CDRF_NEWFONT;
+    }}
+    return CDRF_DODEFAULT;
 }
 
 static int cmp_str(const void *a, const void *b)
@@ -1110,6 +1336,9 @@ static void do_browse_zip(void)
     ofn.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST;
     if (GetOpenFileNameA(&ofn)) {
         strncpy(g_zipPath,buf,MAX_PATH-1);
+        load_zip_pdf_names(g_zipPath);
+        merge_refresh_list(0);
+        merge_update_header();
         InvalidateRect(g_hwnd, NULL, FALSE); }
 }
 
@@ -1178,6 +1407,33 @@ static void do_run_merge(void)
         MessageBoxA(g_hwnd,err,"Error",MB_ICONERROR|MB_OK);
         RemoveDirectoryA(temp_dir); return; }
 
+    /* Reorder extracted paths to match g_merge_names user order (if list was loaded).
+     * For each slot in g_merge_names find the matching extracted path by basename. */
+    if (g_merge_count > 0) {
+        char **ordered = (char**)calloc(count, sizeof(char*));
+        int   n_ord    = 0;
+        if (ordered) {
+            /* Walk g_merge_names order; for each entry find the extracted file */
+            for (int i = 0; i < g_merge_count && n_ord < count; i++) {
+                for (int j = 0; j < count; j++) {
+                    if (!pdfs[j]) continue;
+                    const char *bname = PathFindFileNameA(pdfs[j]);
+                    if (_stricmp(bname, g_merge_names[i]) == 0) {
+                        ordered[n_ord++] = pdfs[j];
+                        pdfs[j] = NULL; /* mark as consumed */
+                        break;
+                    }
+                }
+            }
+            /* Append any extracted files not matched in g_merge_names */
+            for (int j = 0; j < count; j++)
+                if (pdfs[j]) ordered[n_ord++] = pdfs[j];
+            /* Replace pdfs array with the ordered one */
+            for (int j = 0; j < count; j++) pdfs[j] = ordered[j];
+            free(ordered);
+        }
+    }
+
     int rc=pdf_merge_files((const char**)pdfs,count,out_path,err,sizeof(err));
 
     for (int i=0;i<count;i++) { DeleteFileA(pdfs[i]); free(pdfs[i]); }
@@ -1221,8 +1477,18 @@ static void do_run_split(void)
         MessageBoxA(g_hwnd,"Could not create output folder.","Error",MB_ICONERROR|MB_OK);
         return; }
 
+    /* Custom page base name — empty means use source filename */
+    char split_name[MAX_PATH];
+    GetWindowTextA(g_hEditSplitName, split_name, MAX_PATH);
+    /* Trim leading/trailing whitespace */
+    { char *s=split_name; while(*s==' '||*s=='\t') memmove(s,s+1,strlen(s));
+      int tl=(int)strlen(split_name);
+      while(tl>0&&(split_name[tl-1]==' '||split_name[tl-1]=='\t')) split_name[--tl]=0; }
+
     char err[256];
-    int n=pdf_split_file(g_splitPdfPath,out_folder,err,sizeof(err));
+    int n=pdf_split_file(g_splitPdfPath, out_folder,
+                         split_name[0] ? split_name : NULL,
+                         err, sizeof(err));
     if (n<0) {
         RemoveDirectoryA(out_folder);
         MessageBoxA(g_hwnd,err,"Split Failed",MB_ICONERROR|MB_OK); }
@@ -1239,7 +1505,7 @@ static void do_run_split(void)
 
 static char g_arr_paths[MAX_ARR_FILES][MAX_PATH];
 static int  g_arr_count    = 0;
-static int  g_arr_sort_dir = 1;   /* 1 = A→Z, 0 = Z→A */
+static int  g_arr_sort_dir = -1;  /* -1=custom, 1=A-Z, 0=Z-A */
 static int  g_arr_dragging = -1;  /* row being dragged; -1 = none */
 static int  g_arr_drag_tgt = -1;  /* insertion target row          */
 
@@ -1276,11 +1542,22 @@ static void arr_update_header(void)
 {
     HWND hHdr = ListView_GetHeader(g_hListPDFs);
     if (!hHdr) return;
+    char text[128];
+    DWORD fmt = HDF_LEFT | HDF_STRING;
+    if (g_arr_sort_dir == 1) {
+        strcpy(text, "A-Z   |   File");
+        fmt |= HDF_SORTUP;
+    } else if (g_arr_sort_dir == 0) {
+        strcpy(text, "Z-A   |   File");
+        fmt |= HDF_SORTDOWN;
+    } else {
+        strcpy(text, "File   (click header to sort  |  drag or use arrows to reorder)");
+    }
     HDITEM hdi; memset(&hdi, 0, sizeof(hdi));
-    hdi.mask = HDI_FORMAT;
-    Header_GetItem(hHdr, 0, &hdi);
-    hdi.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
-    hdi.fmt |= g_arr_sort_dir ? HDF_SORTUP : HDF_SORTDOWN;
+    hdi.mask       = HDI_TEXT | HDI_FORMAT;
+    hdi.pszText    = text;
+    hdi.cchTextMax = (int)strlen(text) + 1;
+    hdi.fmt        = (int)fmt;
     Header_SetItem(hHdr, 0, &hdi);
 }
 
@@ -1588,9 +1865,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_BTN_BACK_ARR:
             draw_back_btn(dis);
             return TRUE;
-        case ID_BTN_ARR_UP: draw_arr_icon_btn(dis, 0); return TRUE;
-        case ID_BTN_ARR_DN: draw_arr_icon_btn(dis, 1); return TRUE;
-        case ID_BTN_ARR_X:  draw_arr_icon_btn(dis, 2); return TRUE;
+        case ID_BTN_MERGE_UP: draw_arr_icon_btn(dis, 0); return TRUE;
+        case ID_BTN_MERGE_DN: draw_arr_icon_btn(dis, 1); return TRUE;
+        case ID_BTN_ARR_UP:   draw_arr_icon_btn(dis, 0); return TRUE;
+        case ID_BTN_ARR_DN:   draw_arr_icon_btn(dis, 1); return TRUE;
+        case ID_BTN_ARR_X:    draw_arr_icon_btn(dis, 2); return TRUE;
         }
         break;
     }
@@ -1622,6 +1901,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_NOTIFY: {
         NMHDR *hdr = (NMHDR*)lp;
+
+        /* ── Merge file-order list ── */
+        if (hdr->hwndFrom == g_hListMergePDFs) {
+            switch (hdr->code) {
+            case NM_CUSTOMDRAW:
+                return on_merge_customdraw((LPNMLVCUSTOMDRAW)lp);
+            case LVN_COLUMNCLICK:
+                /* Toggle sort direction; re-sort and reflect in header */
+                g_merge_sort_dir = (g_merge_sort_dir == 1) ? 0 : 1;
+                merge_sort();
+                merge_refresh_list(-1);
+                merge_update_header();
+                break;
+            case LVN_BEGINDRAG: {
+                NMLISTVIEW *nmlv = (NMLISTVIEW*)lp;
+                g_merge_dragging = nmlv->iItem;
+                g_merge_drag_tgt = nmlv->iItem;
+                SetCapture(hwnd);
+                SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                break;
+            }
+            }
+        }
+
+        /* ── Arrange list ── */
         if (hdr->hwndFrom == g_hListPDFs) {
             switch (hdr->code) {
 
@@ -1629,8 +1933,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return on_arrange_customdraw((LPNMLVCUSTOMDRAW)lp);
 
             case LVN_COLUMNCLICK: {
-                /* Toggle sort direction and re-sort */
-                g_arr_sort_dir = !g_arr_sort_dir;
+                g_arr_sort_dir = (g_arr_sort_dir == 1) ? 0 : 1;
                 arr_sort();
                 arr_refresh_list(-1);
                 arr_update_header();
@@ -1638,7 +1941,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
 
             case LVN_BEGINDRAG: {
-                /* Start internal drag-reorder — only if click is past button zone */
                 NMLISTVIEW *nmlv = (NMLISTVIEW*)lp;
                 if (nmlv->ptAction.x >= 80) {
                     g_arr_dragging = nmlv->iItem;
@@ -1665,24 +1967,53 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             TRACKMOUSEEVENT tme={sizeof(tme),TME_LEAVE,hwnd,0};
             TrackMouseEvent(&tme);
         }
-        /* Drag-reorder: live shifting — items actually move as you drag */
+        /* Drag-reorder in Merge list */
+        if (g_merge_dragging >= 0 && g_screen == SCR_MERGE) {
+            POINT pt={(short)LOWORD(lp),(short)HIWORD(lp)};
+            MapWindowPoints(hwnd, g_hListMergePDFs, &pt, 1);
+            LVHITTESTINFO hti; memset(&hti,0,sizeof(hti)); hti.pt = pt;
+            int tgt = ListView_HitTest(g_hListMergePDFs, &hti);
+            if (tgt >= 0 && tgt < g_merge_count && tgt != g_merge_drag_tgt) {
+                int step = (tgt > g_merge_dragging) ? 1 : -1;
+                int next = g_merge_dragging + step;
+                if (next >= 0 && next < g_merge_count) {
+                    int old_pos = g_merge_dragging;
+                    merge_swap(old_pos, next);
+                    ListView_SetItemText(g_hListMergePDFs, old_pos, 0, g_merge_names[old_pos]);
+                    ListView_SetItemText(g_hListMergePDFs, next,    0, g_merge_names[next]);
+                    g_merge_dragging = next;
+                    g_merge_drag_tgt = next;
+                    ListView_SetItemState(g_hListMergePDFs, g_merge_dragging,
+                        LVIS_SELECTED|LVIS_FOCUSED, LVIS_SELECTED|LVIS_FOCUSED);
+                    ListView_EnsureVisible(g_hListMergePDFs, g_merge_dragging, FALSE);
+                    InvalidateRect(g_hListMergePDFs, NULL, TRUE);
+                    UpdateWindow(g_hListMergePDFs);
+                }
+            }
+        }
+        /* Drag-reorder in Arrange list */
         if (g_arr_dragging >= 0 && g_screen == SCR_ARRANGE) {
             POINT pt={(short)LOWORD(lp),(short)HIWORD(lp)};
             MapWindowPoints(hwnd, g_hListPDFs, &pt, 1);
             LVHITTESTINFO hti; memset(&hti,0,sizeof(hti)); hti.pt = pt;
             int tgt = ListView_HitTest(g_hListPDFs, &hti);
             if (tgt >= 0 && tgt < g_arr_count && tgt != g_arr_drag_tgt) {
-                /* Shift the item one step toward the target so rows visibly move */
                 int step = (tgt > g_arr_dragging) ? 1 : -1;
                 int next = g_arr_dragging + step;
                 if (next >= 0 && next < g_arr_count) {
-                    arr_swap(g_arr_dragging, next);
+                    int old_pos = g_arr_dragging;
+                    arr_swap(old_pos, next);
+                    ListView_SetItemText(g_hListPDFs, old_pos, 0,
+                        (char*)PathFindFileNameA(g_arr_paths[old_pos]));
+                    ListView_SetItemText(g_hListPDFs, next, 0,
+                        (char*)PathFindFileNameA(g_arr_paths[next]));
                     g_arr_dragging = next;
                     g_arr_drag_tgt = next;
-                    /* Keep the item selected while dragging */
                     ListView_SetItemState(g_hListPDFs, g_arr_dragging,
                         LVIS_SELECTED|LVIS_FOCUSED, LVIS_SELECTED|LVIS_FOCUSED);
-                    InvalidateRect(g_hListPDFs, NULL, FALSE);
+                    ListView_EnsureVisible(g_hListPDFs, g_arr_dragging, FALSE);
+                    InvalidateRect(g_hListPDFs, NULL, TRUE);
+                    UpdateWindow(g_hListPDFs);
                 }
             }
         }
@@ -1690,6 +2021,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_LBUTTONUP: {
+        /* End merge-list drag */
+        if (g_merge_dragging >= 0) {
+            int final_pos = g_merge_dragging;
+            ReleaseCapture();
+            g_merge_dragging = -1;
+            g_merge_drag_tgt = -1;
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            /* User manually reordered — clear sort indicator */
+            g_merge_sort_dir = -1;
+            merge_update_header();
+            ListView_SetItemState(g_hListMergePDFs, final_pos,
+                LVIS_SELECTED|LVIS_FOCUSED, LVIS_SELECTED|LVIS_FOCUSED);
+            ListView_EnsureVisible(g_hListMergePDFs, final_pos, FALSE);
+            InvalidateRect(g_hListMergePDFs, NULL, TRUE);
+            UpdateWindow(g_hListMergePDFs);
+        }
+        /* End arrange-list drag */
         if (g_arr_dragging >= 0) {
             /* Item is already at its final position (live-shifted in WM_MOUSEMOVE) */
             int final_pos = g_arr_dragging;
@@ -1697,11 +2045,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_arr_dragging = -1;
             g_arr_drag_tgt = -1;
             SetCursor(LoadCursor(NULL, IDC_ARROW));
-            /* Ensure the dropped item remains selected and visible */
+            /* User manually reordered — clear sort indicator */
+            g_arr_sort_dir = -1;
+            arr_update_header();
+            /* Keep the dropped item selected, clear the drag highlight */
             ListView_SetItemState(g_hListPDFs, final_pos,
                 LVIS_SELECTED|LVIS_FOCUSED, LVIS_SELECTED|LVIS_FOCUSED);
             ListView_EnsureVisible(g_hListPDFs, final_pos, FALSE);
-            InvalidateRect(g_hListPDFs, NULL, FALSE);
+            InvalidateRect(g_hListPDFs, NULL, TRUE);
+            UpdateWindow(g_hListPDFs);
         }
         return 0;
     }
@@ -1725,20 +2077,52 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_DROP_AREA:       do_browse_zip();           break;
         case ID_DROP_SPLIT:      do_browse_pdf_split();     break;
         case ID_BTN_SPLIT_BROWSE:do_browse_split_dir();     break;
+        case ID_BTN_MERGE_UP: {
+            int sel=ListView_GetNextItem(g_hListMergePDFs,-1,LVNI_SELECTED);
+            if (sel>0) {
+                merge_swap(sel, sel-1);
+                g_merge_sort_dir = -1;
+                merge_refresh_list(sel-1);
+                merge_update_header();
+            }
+            break; }
+        case ID_BTN_MERGE_DN: {
+            int sel=ListView_GetNextItem(g_hListMergePDFs,-1,LVNI_SELECTED);
+            if (sel>=0 && sel<g_merge_count-1) {
+                merge_swap(sel, sel+1);
+                g_merge_sort_dir = -1;
+                merge_refresh_list(sel+1);
+                merge_update_header();
+            }
+            break; }
         case ID_BTN_RUN_MERGE:   do_run_merge();            break;
         case ID_BTN_RUN_SPLIT:   do_run_split();            break;
         case ID_BTN_ADD_PDFS:    arr_add_files(); break;
+        case ID_BTN_ARR_CLEAR:
+            g_arr_count = 0;
+            arr_refresh_list(-1);
+            break;
         case ID_BTN_ARR_UP: {
             int sel=ListView_GetNextItem(g_hListPDFs,-1,LVNI_SELECTED);
-            if (sel>0) { arr_swap(sel,sel-1); arr_refresh_list(sel-1); }
+            if (sel>0) {
+                arr_swap(sel,sel-1); g_arr_sort_dir=-1;
+                arr_refresh_list(sel-1); arr_update_header();
+            }
             break; }
         case ID_BTN_ARR_DN: {
             int sel=ListView_GetNextItem(g_hListPDFs,-1,LVNI_SELECTED);
-            if (sel>=0 && sel<g_arr_count-1) { arr_swap(sel,sel+1); arr_refresh_list(sel+1); }
+            if (sel>=0 && sel<g_arr_count-1) {
+                arr_swap(sel,sel+1); g_arr_sort_dir=-1;
+                arr_refresh_list(sel+1); arr_update_header();
+            }
             break; }
         case ID_BTN_ARR_X: {
             int sel=ListView_GetNextItem(g_hListPDFs,-1,LVNI_SELECTED);
-            if (sel>=0) { arr_remove(sel); arr_refresh_list(sel<g_arr_count?sel:g_arr_count-1); }
+            if (sel>=0) {
+                arr_remove(sel); g_arr_sort_dir=-1;
+                arr_refresh_list(sel<g_arr_count?sel:g_arr_count-1);
+                arr_update_header();
+            }
             break; }
         case ID_BTN_RUN_ARR:     do_run_arrange();          break;
         }
@@ -1774,6 +2158,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int nlen=(int)strlen(path);
             if (nlen>4 && _stricmp(path+nlen-4,".zip")==0) {
                 strncpy(g_zipPath,path,MAX_PATH-1);
+                load_zip_pdf_names(g_zipPath);
+                merge_refresh_list(0);
+                merge_update_header();
                 InvalidateRect(hwnd, NULL, FALSE);
             } else MessageBoxA(hwnd,"Please drop a .zip file.","Wrong File Type",MB_ICONWARNING|MB_OK);
         } else if (g_screen==SCR_SPLIT) {
@@ -1792,7 +2179,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (nlen>4 && _stricmp(path+nlen-4,".pdf")==0)
                     strncpy(g_arr_paths[g_arr_count++], path, MAX_PATH-1);
             }
+            g_arr_sort_dir = -1;
             arr_refresh_list(g_arr_count-1);
+            arr_update_header();
         }
         DragFinish(hd);
         return 0;
